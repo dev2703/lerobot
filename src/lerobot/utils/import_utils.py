@@ -165,6 +165,7 @@ _hidapi_available = is_package_available("hidapi", import_name="hid")
 
 # Data / serialization
 _datasets_available = is_package_available("datasets")
+_pyarrow_available = is_package_available("pyarrow")
 _pandas_available = is_package_available("pandas")
 _faker_available = is_package_available("faker")
 _msgpack_available = is_package_available("msgpack")

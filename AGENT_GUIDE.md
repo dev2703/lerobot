@@ -4,23 +4,39 @@ This file is a practical, copy-paste-friendly companion for any AI agent (Cursor
 
 ---
 
-## 1. Start here — ask the user first (MANDATORY)
+## 1. Start with the current task
 
-Before suggesting any command, an agent MUST ask the user at least these questions and wait for answers:
+Use the user's stated goal and information already available in the conversation,
+configuration, and repository. Ask only for missing information that changes the
+next step. An offline dataset audit needs a local directory or cached repository
+ID and an external report destination; it does not need robot details or a
+training budget. Recording needs the robot, teleoperator, cameras, and task.
+Training choices need the dataset, available compute, and intended outcome.
+Preserve authorization already given and proceed with useful local inspection.
 
-1. **What's your goal?** (e.g. "teach my SO-101 to fold a cloth", "train a policy on an existing HF dataset", "contribute a PR", "understand the codebase")
-2. **What hardware do you have?**
-   - Robot: none / SO-100 / SO-101 / Koch / LeKiwi / Reachy / other
-   - Teleop: leader arm / phone / keyboard / gamepad / none
-   - Cameras: how many, resolution, fixed or moving?
-3. **What machine will you train on?**
-   - GPU model + VRAM (e.g. "laptop 3060 6 GB", "RTX 4090 24 GB", "A100 80 GB", "CPU only")
-   - OS: macOS / Linux / Windows
-4. **Skill level & time budget?** First time, some ML, experienced? Hours, days, a weekend?
-5. **Do you already have a dataset?** Yes (HF repo id?) / no / want to record one
-6. **How can I help right now?** (pick one concrete next step)
+For structural dataset problems, use
+[`lerobot-dataset-audit`](./skills/lerobot-dataset-audit/SKILL.md). It checks
+v3.0 episode boundaries, timestamps, and referenced video coverage entirely
+offline, producing `audit.json` and `audit.md` without changing the dataset.
+See its [usage reference](./skills/lerobot-dataset-audit/references/usage.md)
+for commands and interpretation limits.
 
-Only after you have answers, propose a concrete path. If something is ambiguous, ask again rather than guessing. Bias toward **the simplest thing that works** for the user's hardware and goal.
+The [agent-skills implementation plan](./docs/agent-skills-plan.md) describes all
+seven workflows. Only the dataset-audit skill is implemented in this contribution:
+
+| Skill                                                              | Result                                                               | Status                           |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------- | -------------------------------- |
+| [`lerobot-dataset-audit`](./skills/lerobot-dataset-audit/SKILL.md) | Evidence-backed dataset integrity report                             | Implemented pilot: v3.0, offline |
+| `lerobot-policy-diagnosis`                                         | Ranked ACT/SmolVLA failure hypotheses and distinguishing experiments | Planned                          |
+| `lerobot-setup-check`                                              | SO-101 readiness report with explicit verification limits            | Planned                          |
+| `lerobot-policy-integrator`                                        | Repository-conformant policy integration and tests                   | Planned                          |
+| `lerobot-experiment-designer`                                      | Reproducible controlled-experiment manifest                          | Planned                          |
+| `lerobot-recording-review`                                         | Timestamped human review queue                                       | Planned                          |
+| `lerobot-ros2-adapter`                                             | Offline conversion recipe or reviewed hardware plugin                | Planned                          |
+
+An inspection request does not authorize dataset repair, downloads, uploads,
+training, or robot movement. Follow the task's scope and the relevant workflow's
+boundaries.
 
 If their robot, teleoperator, or camera isn't natively supported, check the community plugins in [`third_party_robots.mdx`](./docs/source/third_party_robots.mdx) and [`third_party_sensors.mdx`](./docs/source/third_party_sensors.mdx) before proposing a custom integration. If nothing fits, follow [`integrate_hardware.mdx`](./docs/source/integrate_hardware.mdx).
 
