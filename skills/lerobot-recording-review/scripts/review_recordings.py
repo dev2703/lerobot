@@ -169,6 +169,8 @@ def review(
             name: importlib.metadata.version(name) for name in ("av", "numpy", "pyarrow")
         }
         info = json.loads((root / "meta/info.json").read_text())
+        if not isinstance(info, dict):
+            raise ValueError("Dataset metadata must be a JSON object")
         report["format"] = info.get("codebase_version")
         if info.get("codebase_version") != "v3.0" or info.get("storage_format", "parquet") != "parquet":
             raise ValueError("Only v3.0 Parquet episode metadata is supported")
@@ -176,11 +178,22 @@ def review(
         if not math.isfinite(fps) or fps <= 0:
             raise ValueError("FPS must be finite and positive")
         features = info["features"]
-        cameras = sorted(k for k, v in features.items() if v.get("dtype") == "video" and not is_depth_map(v))
-        report["cameras"] = cameras
+        if not isinstance(features, dict):
+            raise ValueError("Dataset features must be a JSON object")
+        cameras = []
         for key, feature in features.items():
+            if not isinstance(feature, dict):
+                report["unavailable"].append(f"{key}: feature metadata must be a JSON object")
+                continue
+            if feature.get("info") is not None and not isinstance(feature["info"], dict):
+                report["unavailable"].append(f"{key}: feature info must be a JSON object or null")
+                continue
             if feature.get("dtype") == "image" or is_depth_map(feature):
                 report["unavailable"].append(f"{key}: image-only/depth inspection is unsupported")
+            elif feature.get("dtype") == "video":
+                cameras.append(key)
+        cameras.sort()
+        report["cameras"] = cameras
         for key in sorted(set(expected_cameras) - set(cameras)):
             report["unavailable"].append(f"Expected camera unavailable: {key}")
         if not cameras:

@@ -287,6 +287,110 @@ def test_unset_or_false_depth_markers_preserve_rgb_sampling(tmp_path: Path, meta
     assert not report["unavailable"]
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"info": None, "video_info": {"video.is_depth_map": True}},
+        {"info": {"is_depth_map": True}, "video_info": {"video.is_depth_map": False}},
+        {"info": {"is_depth_map": "false"}},
+        {"video_info": {"video.is_depth_map": 1}},
+    ],
+)
+def test_truthy_depth_markers_override_rgb_appearance(tmp_path: Path, metadata: dict[str, Any]) -> None:
+    # Match upstream truthiness, including nonempty strings: do not silently interpret
+    # the string "false" as JSON false. Even a three-channel preview can be colorized depth.
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["features"][CAMERA].update(metadata)
+    path.write_text(json.dumps(info))
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "incomplete"
+    assert report["cameras"] == []
+    assert not report["samples"] and not report["queue"]
+
+
+@pytest.mark.parametrize("level", ["root", "features"])
+@pytest.mark.parametrize("malformed", [None, [], "not-an-object"])
+def test_malformed_metadata_containers_produce_incomplete_reports(
+    tmp_path: Path, level: str, malformed: Any
+) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    if level == "root":
+        info = malformed
+    else:
+        info["features"] = malformed
+    path.write_text(json.dumps(info))
+    before = hashes(root)
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "incomplete"
+    assert report["unavailable"] and not report["samples"]
+    assert hashes(root) == before
+
+
+@pytest.mark.parametrize(
+    "feature",
+    [
+        None,
+        [],
+        "not-an-object",
+        {"dtype": "video", "info": []},
+        {"dtype": "video", "info": [1]},
+        {"dtype": "video", "info": "not-an-object"},
+        {"dtype": "video", "info": 1},
+    ],
+)
+@pytest.mark.parametrize("rgb_available", [False, True], ids=["malformed-only", "rgb-and-malformed"])
+def test_malformed_feature_does_not_crash_or_block_other_rgb_cameras(
+    tmp_path: Path, feature: Any, rgb_available: bool
+) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    key = "observation.images.invalid" if rgb_available else CAMERA
+    info["features"][key] = feature
+    path.write_text(json.dumps(info))
+    before = hashes(root)
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "incomplete"
+    assert report["cameras"] == ([CAMERA] if rgb_available else [])
+    assert any(key in issue for issue in report["unavailable"])
+    assert report["coverage"]["sampled_frames"] == (10 if rgb_available else 0)
+    assert all(s["camera"] != key for s in report["samples"])
+    assert hashes(root) == before
+
+
+def test_depth_named_rgb_camera_is_not_classified_by_name(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    # A legacy camera alias is not a modality declaration. Resolve the existing video
+    # independently of the feature key to avoid creating another synthetic recording.
+    key = "observation.images.depth_camera_rgb"
+    info["features"][key] = info["features"].pop(CAMERA)
+    info["video_path"] = info["video_path"].replace("{video_key}", CAMERA)
+    path.write_text(json.dumps(info))
+    episodes_path = root / "meta/episodes/chunk-000/file-000.parquet"
+    table = pq.read_table(episodes_path)
+    pq.write_table(
+        table.rename_columns([name.replace(CAMERA, key) for name in table.column_names]), episodes_path
+    )
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "sampled"
+    assert report["cameras"] == [key]
+    assert report["coverage"]["sampled_frames"] == 10
+
+
 def test_private_frame_export(tmp_path: Path) -> None:
     root = make_dataset(tmp_path / "dataset")
     before = hashes(root)

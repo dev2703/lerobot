@@ -44,6 +44,22 @@ An unavailable sample may be a local cache omission or decoding/metadata issue;
 route structural questions to an audit rather than declaring remote corruption.
 Image-only and depth features remain explicitly uninspected.
 
+Depth markers take precedence over camera names and apparent channel count. The
+helper recognizes `info.is_depth_map`, `info["video.is_depth_map"]`, and
+`video_info["video.is_depth_map"]`, using the truthiness semantics in
+`src/lerobot/configs/video.py`. For example, a nonempty string `"false"` is not a
+JSON boolean `false`; it causes the stream to be excluded like upstream. Do not
+silently reinterpret it or rewrite metadata during review. Malformed feature
+objects are reported unavailable while other supported cameras can still run.
+
+An absent depth marker does not prove a stream is RGB. Colorized depth can have
+three channels, and a grayscale stream could be infrared rather than depth. If
+recording/conversion provenance suggests missing modality tags, verify the source
+configuration before interpreting RGB heuristics. Raw 12/16-bit depth codes and
+physical depth units are not brightness measurements. Do not infer modality from
+names, shapes, or a plausible-looking preview alone; preserve ambiguity when the
+producer's modality declaration cannot be established.
+
 Measurements use 64x64 grayscale previews in 0–255 intensity units. Defaults flag
 mean below 12 (dark), spatial standard deviation below 4 (low contrast), or mean
 absolute difference below 1 between adjacent sampled previews (little change).
