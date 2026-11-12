@@ -234,6 +234,59 @@ def test_image_only_camera_cannot_receive_video_pass(tmp_path: Path) -> None:
     assert report["coverage"]["sampled_frames"] == 0
 
 
+@pytest.mark.parametrize(
+    "marker_field,marker_key",
+    [("info", "is_depth_map"), ("info", "video.is_depth_map"), ("video_info", "video.is_depth_map")],
+)
+@pytest.mark.parametrize("rgb_available", [False, True], ids=["depth-only", "rgb-and-depth"])
+def test_depth_markers_exclude_streams_from_rgb_sampling(
+    tmp_path: Path, marker_field: str, marker_key: str, rgb_available: bool
+) -> None:
+    root = make_dataset(tmp_path / "dataset", "dark-first")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    depth_key = "observation.images.depth" if rgb_available else CAMERA
+    # A mixed dataset deliberately has no depth file or episode references: unsupported
+    # streams must be excluded before metadata lookup, decoding, and RGB heuristics.
+    feature = {"dtype": "video", "info": {"is_depth_map": False, "video.is_depth_map": False}}
+    feature.setdefault(marker_field, {})[marker_key] = True
+    info["features"][depth_key] = feature
+    path.write_text(json.dumps(info))
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "incomplete"
+    assert report["cameras"] == ([CAMERA] if rgb_available else [])
+    assert f"{depth_key}: image-only/depth inspection is unsupported" in report["unavailable"]
+    assert report["coverage"]["sampled_frames"] == (10 if rgb_available else 0)
+    assert all(s["camera"] != depth_key for s in report["samples"])
+    assert all(q["camera"] != depth_key for q in report["queue"])
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"info": None},
+        {"info": {"is_depth_map": False, "video.is_depth_map": False}},
+        {"video_info": {"video.is_depth_map": False}},
+        {"info": None, "video_info": "legacy non-dictionary value"},
+    ],
+)
+def test_unset_or_false_depth_markers_preserve_rgb_sampling(tmp_path: Path, metadata: dict[str, Any]) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["features"][CAMERA].update(metadata)
+    path.write_text(json.dumps(info))
+
+    report = reviewer.review(root)
+
+    assert report["status"] == "sampled"
+    assert report["cameras"] == [CAMERA]
+    assert report["coverage"]["sampled_frames"] == 10
+    assert not report["unavailable"]
+
+
 def test_private_frame_export(tmp_path: Path) -> None:
     root = make_dataset(tmp_path / "dataset")
     before = hashes(root)
