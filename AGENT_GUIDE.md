@@ -22,6 +22,11 @@ produces a bounded private summary from explicitly extracted facts without
 loading models, copying recordings, or accessing hardware. Missing evidence is
 reported explicitly; offline loss does not establish closed-loop success.
 
+For maintainers changing skill instructions, the
+[paired agent evaluation](./docs/agent-skill-evaluation.md) compares routing,
+conclusions, interventions, and elapsed time on the same synthetic tasks with
+and without instructions. Helper tests alone do not measure agent behavior.
+
 A diagnostic request does not authorize downloads, training, uploads, dataset
 changes, hardware access, or robot movement. Follow the current task's scope and
 the skill's boundaries.

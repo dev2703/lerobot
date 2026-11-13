@@ -147,6 +147,12 @@ experiment would distinguish that explanation.
 
 ## Behavioral acceptance tasks
 
+Use the [paired agent evaluation harness](../../../docs/agent-skill-evaluation.md)
+to prepare matching tasks, capture actual agent runs and elapsed time, and load
+independent adjudications. The harness includes camera-mismatch and
+insufficient-evidence cases; its unit tests are bookkeeping checks, not measured
+agent behavior.
+
 Use the scenarios above plus missing-all-evidence and clean-contract physical
 failure requests to evaluate the **agent**, not just the helper. Supply raw
 synthetic configs/trace snippets, hide the intended answer from the evaluator,
