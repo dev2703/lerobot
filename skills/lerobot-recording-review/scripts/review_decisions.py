@@ -141,6 +141,8 @@ def apply_decisions(report: dict[str, Any], supplied: Any) -> dict[str, Any]:
     coverage = _object(result.get("coverage"), "Report coverage")
     coverage["semantic_reviewed_frames"] = len(reviewed_samples)
     coverage["semantic_reviewed_clips"] = len(reviewed_clips)
+    for interval in coverage.get("inspected_clip_intervals", []):
+        interval["semantic_review"] = "reviewed" if interval.get("clip_id") in reviewed_clips else "pending"
     coverage["semantic_reviewed_intervals"] = [
         {k: clips[i][k] for k in ("clip_id", "episode_index", "camera", "actual_interval_s")}
         for i in reviewed_clips

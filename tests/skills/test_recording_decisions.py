@@ -24,7 +24,11 @@ def report() -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "status": "sampled",
-        "coverage": {"sampled_frames": 3, "semantic_reviewed_frames": 0},
+        "coverage": {
+            "sampled_frames": 3,
+            "semantic_reviewed_frames": 0,
+            "inspected_clip_intervals": [{"clip_id": "clip-0", "semantic_review": "pending"}],
+        },
         "queue": [
             {"candidate_id": key, "classification": kind, "disposition": "pending"}
             for key, kind in (
@@ -70,8 +74,11 @@ def test_counts_and_inspection_are_separate_and_idempotent(report: dict[str, Any
     assert result["decisions_summary"]["flags"]["pending"] == 0
     assert result["coverage"]["semantic_reviewed_frames"] == 1
     assert result["coverage"]["semantic_reviewed_clips"] == 1
+    assert result["coverage"]["inspected_clip_intervals"][0]["semantic_review"] == "reviewed"
     assert result["coverage"]["semantic_reviewed_intervals"][0]["actual_interval_s"] == [0.0, 0.5]
     assert decisions.apply_decisions(result, supplied) == result
+    reset = decisions.apply_decisions(result, [])
+    assert reset["coverage"]["inspected_clip_intervals"][0]["semantic_review"] == "pending"
 
 
 def test_dispositions_do_not_imply_visual_coverage(report: dict[str, Any]) -> None:
