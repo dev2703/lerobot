@@ -216,7 +216,7 @@ def _check_episode_contract(
 
 
 def audit_tables(
-    root: Path, info: dict[str, Any], report: AuditReport, tolerance_s: float
+    root: Path, info: dict[str, Any], report: AuditReport, tolerance_s: float, *, scan_rows: bool = True
 ) -> list[dict[str, Any]]:
     """Check v3.0 metadata and rows without constructing or caching a Dataset.
 
@@ -240,6 +240,19 @@ def audit_tables(
     findings_before = len(report.findings)
     episodes, metadata_count = _load_episodes(root, report)
     by_id = _check_episode_contract(episodes, metadata_count, info, report)
+    if not scan_rows:
+        report.coverage["inspected_rows"] = 0
+        report.coverage["table_scan_scope"] = "episode metadata only"
+        report.add(
+            "rows.integrity",
+            "not_checked",
+            "info",
+            {},
+            "Observation row indices, lengths, ordering and timestamps",
+            "Video spot mode reads episode metadata without scanning observation tables",
+            next_action="Run --video-scan full for structural row and complete video checks.",
+        )
+        return episodes
     template = info["data_path"]
     paths_by_id: dict[int, Path] = {}
     for ep_id, episode in by_id.items():

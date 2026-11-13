@@ -28,6 +28,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "skills/**"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -38,6 +39,7 @@ on:
     paths:
       - "src/**"
       - "tests/**"
+      - "skills/**"
       - ".github/workflows/**"
       - "pyproject.toml"
       - "uv.lock"

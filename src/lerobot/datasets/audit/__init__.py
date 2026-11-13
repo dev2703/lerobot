@@ -90,15 +90,15 @@ def audit_dataset(
         environment=_environment(),
         settings={
             "video_scan": video_scan,
-            "sample_seed": sample_seed if video_scan == "sample" else None,
+            "sample_seed": sample_seed if video_scan in ("sample", "spot") else None,
             "timestamp_tolerance_s": tolerance,
             "timestamp_tolerance_overridden": timestamp_tolerance_s is not None,
             "offline": True,
         },
     )
     try:
-        if video_scan not in ("full", "sample"):
-            raise InputResolutionError("video_scan must be full or sample.")
+        if video_scan not in ("full", "sample", "spot"):
+            raise InputResolutionError("video_scan must be full, sample or spot.")
         if (
             isinstance(tolerance, bool)
             or not isinstance(tolerance, (int, float))
@@ -152,7 +152,7 @@ def audit_dataset(
                 next_action="Use a v3.0 dataset; migration is outside this audit.",
             )
             return report
-        if info.get("storage_format") not in (None, "lerobot"):
+        if (info.get("storage_format") or "lerobot") != "lerobot":
             report.complete = False
             report.add(
                 "input.storage_format",
@@ -192,7 +192,11 @@ def audit_dataset(
             return report
         from .tables import audit_tables
 
-        episodes = audit_tables(path, info, report, tolerance)
+        episodes = (
+            audit_tables(path, info, report, tolerance, scan_rows=False)
+            if video_scan == "spot"
+            else audit_tables(path, info, report, tolerance)
+        )
         from .video import audit_videos
 
         audit_videos(

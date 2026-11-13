@@ -126,14 +126,26 @@ def test_unsupported_format_is_incomplete(dataset_root: Path, version: str | Non
     assert report.findings[0].check_id == "input.format"
 
 
-def test_unsupported_storage_backend(dataset_root: Path) -> None:
+@pytest.mark.parametrize("storage_format", ["lance", "parquet"])
+def test_unsupported_storage_backend(dataset_root: Path, storage_format: str) -> None:
     path = dataset_root / "meta/info.json"
     info = json.loads(path.read_text())
-    info["storage_format"] = "lance"
+    info["storage_format"] = storage_format
     path.write_text(json.dumps(info))
     report = audit_dataset(dataset_root)
     assert report.exit_code == 2 and not report.complete
     assert report.findings[0].check_id == "input.storage_format"
+
+
+@pytest.mark.parametrize("storage_format", [None, "lerobot", "", False, 0])
+def test_default_storage_backend_matches_reader_fallback(dataset_root: Path, storage_format) -> None:
+    path = dataset_root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["storage_format"] = storage_format
+    path.write_text(json.dumps(info))
+    report = audit_dataset(dataset_root)
+    assert report.exit_code == 0
+    assert report.coverage["inspected_rows"] == 3
     assert all(f.classification != "verified_fault" for f in report.findings)
 
 
@@ -189,6 +201,45 @@ def test_tolerance_override_recorded(dataset_root: Path) -> None:
     assert report.exit_code == 0
     assert report.settings["timestamp_tolerance_overridden"]
     assert report.settings["timestamp_tolerance_s"] == 0.002
+
+
+def test_spot_cli_skips_observation_scan_and_reports_limits(dataset_root: Path, tmp_path: Path, monkeypatch):
+    from lerobot.datasets.audit import tables
+
+    original = tables.pq.ParquetFile
+
+    def metadata_only(path):
+        assert "meta/episodes" in str(path), "Spot mode must not open observation tables"
+        return original(path)
+
+    monkeypatch.setattr(tables.pq, "ParquetFile", metadata_only)
+    output = tmp_path / "spot-report"
+    assert (
+        main(
+            [
+                "--root",
+                str(dataset_root),
+                "--video-scan",
+                "spot",
+                "--sample-seed",
+                "17",
+                "--output-dir",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    report = json.loads((output / "audit.json").read_text())
+    assert report["coverage"]["inspected_rows"] == 0
+    assert report["settings"]["video_scan"] == "spot"
+    assert report["settings"]["sample_seed"] == 17
+    assert any(
+        f["check_id"] == "rows.integrity" and f["classification"] == "not_checked" for f in report["findings"]
+    )
+    assert not any(
+        f["check_id"] == "timestamps.consistency" and f["classification"] == "passed"
+        for f in report["findings"]
+    )
 
 
 def test_interruption_saves_partial_evidence(dataset_root: Path, tmp_path: Path, monkeypatch) -> None:

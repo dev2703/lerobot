@@ -39,8 +39,11 @@ different dataset.
 
 Video scanning defaults to `--video-scan full`. In `sample` mode, seeded
 reservoir sampling selects up to 64 observation timestamp lookups per episode
-and camera. Both modes still decode all frames in every referenced video file;
-sampling reduces lookup coverage, not decoding work. For example:
+and camera. Both modes still audit all observation rows and decode all frames in
+every referenced video file; sampling reduces lookup coverage, not decoding work.
+The video stage reads each observation shard once into an on-disk timestamp index,
+then reuses it across episodes and cameras. The structural table audit makes its
+own single pass; full/sample are not bounded row scans. For example:
 
 ```bash
 lerobot-audit-dataset \
@@ -49,6 +52,35 @@ lerobot-audit-dataset \
   --sample-seed 17 \
   --output-dir /path/to/reports/dataset-sample
 ```
+
+For an inexpensive **video-only spot check**, explicitly choose `--video-scan spot`:
+
+```bash
+lerobot-audit-dataset \
+  --root /path/to/dataset \
+  --video-scan spot \
+  --sample-seed 17 \
+  --output-dir /path/to/reports/dataset-spot
+```
+
+Spot mode checks episode metadata but skips observation Parquet tables entirely.
+For each referenced video file it selects at most three episode/camera intervals
+(including the temporal endpoints), then seeks to up to three expected FPS-grid
+positions per selected interval. Each seek yields at most 64 decoded frames,
+including keyframe preroll: at most 576 yielded frames per file. Long keyframe
+gaps can exhaust this budget; the report then marks the check incomplete rather
+than treating the missing evidence as a video fault. Container opening and work
+inside a codec are not wall-time bounded.
+
+Targets come from episode length and declared FPS, **not observed row timestamps**.
+`video.grid_spot_check` reports actual targets, distances, dimensions and budgets.
+`rows.integrity` and `video.full_stream_integrity` remain `not_checked`: a successful
+spot check cannot establish row integrity, full-stream PTS order, complete interval
+bounds, unsampled decodability, actual observation lookup coverage, or visual task
+quality. Grid misses are warnings requiring a full audit. Inspect the coverage
+before deciding whether to run `full` or visual recording review.
+In spot mode, `complete` and exit `0` describe completion of the requested spot
+scope only; the explicit `not_checked` findings still prevent a full audit claim.
 
 `--timestamp-tolerance-s` overrides the reader's default `1e-4` seconds. Record
 why an override is justified; increasing tolerance does not repair timestamps
@@ -72,7 +104,8 @@ status = report.exit_code
 | Timestamps                    | `dataset_writer.py` records episode-local frame timestamps; `LeRobotDataset` declares a default tolerance of `1e-4` seconds for the `1/fps` timing contract. Check finite timestamps, strict ordering, frame/FPS agreement, and unexpected gaps.                                                                                     | These timestamps alone do not establish independent sensor capture synchronization or action/state alignment.                                                                                                |
 | Video references and coverage | `dataset_reader.py` shifts requested row timestamps by `videos/<camera>/from_timestamp`. `video_utils.py` compares requested timestamps with decoded presentation timestamps and accepts a closest-frame distance `<= tolerance_s`. Writer metadata records video chunk/file indices and `[from_timestamp, to_timestamp)` intervals. | Encoded frame counts need not equal dataset row counts. A usable nearest frame and valid referenced interval are the relevant evidence. Full decoding establishes decodability, not semantic visual quality. |
 
-The checker streams data and decoded video; shared video paths are scanned once.
+The full/sample checker streams data and decoded video; shared video paths are
+decoded once and shared observation shards are read once by the video stage.
 Inspect the report's actual row, file, camera, interval, and frame coverage before
 describing the scope of a pass. Sampling and cancellation must remain visible in
 the conclusion. Image-only features do not receive a video-integrity pass.

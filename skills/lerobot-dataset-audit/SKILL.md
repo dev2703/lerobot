@@ -21,6 +21,9 @@ source invariants, coverage limits, and report interpretation.
 - Run the offline audit with full video scanning by default. Use sampling only
   when explicitly selected, recording the seed and reduced coverage. Preserve
   partial reports after cancellation or unavailable checks.
+  Use `--video-scan spot` only for an explicitly requested inexpensive video
+  spot check; it skips observation row scans and reports metadata-derived grid
+  probes, leaving row integrity and full-stream coverage unchecked.
 - Read both `audit.json` and `audit.md`. Ground conclusions in check identifiers,
   affected files or episode ranges, measurements, effective tolerances, and
   inspected coverage. Separate severity from certainty.

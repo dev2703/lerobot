@@ -22,17 +22,18 @@ See its [usage reference](./skills/lerobot-dataset-audit/references/usage.md)
 for commands and interpretation limits.
 
 The [agent-skills implementation plan](./docs/agent-skills-plan.md) describes all
-seven workflows. Only the dataset-audit skill is implemented in this contribution:
+seven workflows. This branch implements dataset auditing; recording review and
+policy diagnosis are available on their respective PR branches:
 
-| Skill                                                              | Result                                                               | Status                           |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------- | -------------------------------- |
-| [`lerobot-dataset-audit`](./skills/lerobot-dataset-audit/SKILL.md) | Evidence-backed dataset integrity report                             | Implemented pilot: v3.0, offline |
-| `lerobot-policy-diagnosis`                                         | Ranked ACT/SmolVLA failure hypotheses and distinguishing experiments | Planned                          |
-| `lerobot-setup-check`                                              | SO-101 readiness report with explicit verification limits            | Planned                          |
-| `lerobot-policy-integrator`                                        | Repository-conformant policy integration and tests                   | Planned                          |
-| `lerobot-experiment-designer`                                      | Reproducible controlled-experiment manifest                          | Planned                          |
-| `lerobot-recording-review`                                         | Timestamped human review queue                                       | Planned                          |
-| `lerobot-ros2-adapter`                                             | Offline conversion recipe or reviewed hardware plugin                | Planned                          |
+| Skill                                                                   | Result                                                               | Status                           |
+| ----------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------- |
+| [`lerobot-dataset-audit`](./skills/lerobot-dataset-audit/SKILL.md)      | Evidence-backed dataset integrity report                             | Implemented pilot: v3.0, offline |
+| [`lerobot-policy-diagnosis`](https://github.com/dev2703/lerobot/pull/3) | Ranked ACT/SmolVLA failure hypotheses and distinguishing experiments | Implemented in separate PR       |
+| `lerobot-setup-check`                                                   | SO-101 readiness report with explicit verification limits            | Planned                          |
+| `lerobot-policy-integrator`                                             | Repository-conformant policy integration and tests                   | Planned                          |
+| `lerobot-experiment-designer`                                           | Reproducible controlled-experiment manifest                          | Planned                          |
+| [`lerobot-recording-review`](https://github.com/dev2703/lerobot/pull/2) | Timestamped human review queue, bounded event clips, human decisions | Implemented in separate PR       |
+| `lerobot-ros2-adapter`                                                  | Offline conversion recipe or reviewed hardware plugin                | Planned                          |
 
 An inspection request does not authorize dataset repair, downloads, uploads,
 training, or robot movement. Follow the task's scope and the relevant workflow's

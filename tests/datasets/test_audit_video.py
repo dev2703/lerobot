@@ -5,6 +5,7 @@
 
 """Synthetic video coverage cases; no network, downloads, or private recordings."""
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ CAMERA = "observation.images.camera"
 
 
 def _fixture(
-    root: Path, *, video_fps: int = 10, frames: int = 6
+    root: Path, *, video_fps: int = 10, frames: int = 6, episode_count: int = 2, episode_length: int = 3
 ) -> tuple[dict[str, Any], list[dict[str, Any]], Path]:
     info = {
         "fps": 10,
@@ -35,28 +36,29 @@ def _fixture(
     }
     episodes = []
     rows = []
-    for episode_index in range(2):
+    duration = episode_length / 10
+    for episode_index in range(episode_count):
         episodes.append(
             {
                 "episode_index": episode_index,
-                "length": 3,
-                "dataset_from_index": episode_index * 3,
-                "dataset_to_index": (episode_index + 1) * 3,
+                "length": episode_length,
+                "dataset_from_index": episode_index * episode_length,
+                "dataset_to_index": (episode_index + 1) * episode_length,
                 "data/chunk_index": 0,
                 "data/file_index": 0,
                 f"videos/{CAMERA}/chunk_index": 0,
                 f"videos/{CAMERA}/file_index": 0,
-                f"videos/{CAMERA}/from_timestamp": episode_index * 0.3,
-                f"videos/{CAMERA}/to_timestamp": (episode_index + 1) * 0.3,
+                f"videos/{CAMERA}/from_timestamp": episode_index * duration,
+                f"videos/{CAMERA}/to_timestamp": (episode_index + 1) * duration,
             }
         )
         rows.extend(
             {
                 "episode_index": episode_index,
-                "index": episode_index * 3 + frame_index,
+                "index": episode_index * episode_length + frame_index,
                 "timestamp": frame_index / 10,
             }
-            for frame_index in range(3)
+            for frame_index in range(episode_length)
         )
     data = root / "data/chunk-000/file-000.parquet"
     data.parent.mkdir(parents=True)
@@ -243,10 +245,79 @@ def test_sample_reservoir_is_repeatable_and_bounded(tmp_path):
     rows = [{"episode_index": 0, "index": index, "timestamp": index / 10} for index in range(200)]
     pq.write_table(pa.Table.from_pylist(rows), tmp_path / "data/chunk-000/file-000.parquet")
     reference = video._Reference(episodes[0], CAMERA, 0, 20, info["features"][CAMERA])
-    first = list(video._queries(tmp_path, info, reference, "sample", 37))
-    assert len(first) == video._SAMPLE_ROWS
-    assert first == list(video._queries(tmp_path, info, reference, "sample", 37))
-    assert first != list(video._queries(tmp_path, info, reference, "sample", 38))
+    with sqlite3.connect(":memory:") as database:
+        video._index_observations(
+            tmp_path, info, {tmp_path / "video.mp4": [reference]}, database, AuditReport()
+        )
+        first = list(video._queries(database, reference, "sample", 37))
+        assert len(first) == video._SAMPLE_ROWS
+        assert first == list(video._queries(database, reference, "sample", 37))
+        assert first != list(video._queries(database, reference, "sample", 38))
+
+
+@pytest.mark.parametrize("mode", ["full", "sample"])
+def test_shared_observation_shard_read_once_across_episodes_and_cameras(tmp_path, monkeypatch, mode):
+    info, episodes, path = _fixture(tmp_path, frames=2000, episode_count=20, episode_length=100)
+    second_camera = "observation.images.second"
+    info["features"][second_camera] = info["features"][CAMERA].copy()
+    info["video_path"] = path.relative_to(tmp_path).as_posix()
+    for episode in episodes:
+        for key, value in list(episode.items()):
+            if key.startswith(f"videos/{CAMERA}/"):
+                episode[key.replace(CAMERA, second_camera)] = value
+    original = video.pq.ParquetFile
+    reads = []
+
+    def observed_parquet(path):
+        reads.append(path)
+        return original(path)
+
+    monkeypatch.setattr(video.pq, "ParquetFile", observed_parquet)
+    report = AuditReport()
+    video.audit_videos(tmp_path, info, episodes, report, video_scan=mode)
+    assert report.exit_code == 0
+    assert len(reads) == 1
+    assert report.coverage["video_observation_rows_read"] == 2000
+    assert report.coverage["video_observations_checked"] == (4000 if mode == "full" else 2560)
+
+
+def test_spot_check_bounds_decoding_and_never_reads_observation_rows(tmp_path, monkeypatch):
+    info, episodes, _ = _fixture(tmp_path, frames=2000, episode_count=20, episode_length=100)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Spot mode must not scan observation Parquet")
+
+    monkeypatch.setattr(video.pq, "ParquetFile", forbidden)
+    report = AuditReport()
+    video.audit_videos(tmp_path, info, episodes, report, video_scan="spot", sample_seed=17)
+    assert report.exit_code == 0
+    assert report.coverage["decoded_video_frames"] < 2000
+    assert report.coverage["decoded_video_frames"] <= report.coverage["video_spot_decode_budget_per_file"]
+    assert report.coverage["video_spot_intervals_checked"] == 3
+    assert report.coverage["video_spot_probes"] == 9
+    assert report.coverage["video_observation_rows_read"] == 0
+    assert report.coverage["video_observations_checked"] == 0
+    assert any(
+        f.check_id == "video.full_stream_integrity" and f.classification == "not_checked"
+        for f in report.findings
+    )
+    assert not any(
+        f.check_id in ("video.observation_coverage", "video.presentation_timestamps")
+        and f.classification == "passed"
+        for f in report.findings
+    )
+
+
+def test_spot_budget_exhaustion_is_incomplete(tmp_path, monkeypatch):
+    info, episodes, _ = _fixture(tmp_path, frames=200, episode_count=2, episode_length=100)
+    monkeypatch.setattr(video, "_SPOT_DECODE_BUDGET", 1)
+    report = AuditReport()
+    video.audit_videos(tmp_path, info, episodes, report, video_scan="spot")
+    assert report.exit_code == 2
+    assert report.coverage["decoded_video_frames"] <= 6
+    assert any(
+        f.check_id == "video.grid_spot_check" and f.classification == "not_checked" for f in report.findings
+    )
 
 
 def test_video_reference_path_cannot_escape_dataset(tmp_path):

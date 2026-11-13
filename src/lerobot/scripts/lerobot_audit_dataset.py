@@ -21,7 +21,12 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--repo-id", help="Resolve an existing cached dataset; never downloads")
     parser.add_argument("--revision", help="Existing cached Hub ref or snapshot")
     parser.add_argument("--output-dir", type=Path, required=True, help="Report directory outside the dataset")
-    parser.add_argument("--video-scan", choices=("full", "sample"), default="full")
+    parser.add_argument(
+        "--video-scan",
+        choices=("full", "sample", "spot"),
+        default="full",
+        help="full/sample audit all rows and decode all video; spot skips row scans and probes bounded video regions",
+    )
     parser.add_argument("--sample-seed", type=int, default=0)
     parser.add_argument("--timestamp-tolerance-s", type=float)
     args = parser.parse_args(argv)

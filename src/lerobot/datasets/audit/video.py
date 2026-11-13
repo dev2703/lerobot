@@ -39,6 +39,9 @@ if TYPE_CHECKING or _pyarrow_available:
 logger = logging.getLogger(__name__)
 _BATCH_SIZE = 4096
 _SAMPLE_ROWS = 64
+_SPOT_INTERVALS = 3
+_SPOT_PROBES = 3
+_SPOT_DECODE_BUDGET = 64
 
 
 @dataclass
@@ -80,37 +83,77 @@ def _dimensions(feature: dict[str, Any]) -> tuple[int, int] | None:
     return height, width
 
 
-def _episode_rows(root: Path, info: dict[str, Any], episode: dict[str, Any]) -> Iterator[tuple[int, float]]:
-    path = _template_path(
-        root,
-        info["data_path"],
-        chunk_index=episode["data/chunk_index"],
-        file_index=episode["data/file_index"],
-    )
-    with pq.ParquetFile(path) as parquet:
-        for batch in parquet.iter_batches(
-            batch_size=_BATCH_SIZE, columns=["episode_index", "index", "timestamp"]
-        ):
-            for row in batch.to_pylist():
-                if row["episode_index"] != episode["episode_index"]:
-                    continue
-                timestamp = row["timestamp"]
-                if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
-                    raise ValueError("Observation timestamp is not numeric")
-                if not math.isfinite(timestamp):
-                    raise ValueError("Observation timestamp is not finite")
-                yield row["index"], float(timestamp)
+def _index_observations(
+    root: Path,
+    info: dict[str, Any],
+    references: dict[Path, list[_Reference]],
+    database: sqlite3.Connection,
+    report: AuditReport,
+) -> dict[int, str]:
+    """Read each referenced data shard once and distribute rows to an on-disk index."""
+    database.execute("CREATE TABLE observations (episode INTEGER, row_index INTEGER, timestamp REAL)")
+    shards: dict[Path, set[int]] = defaultdict(set)
+    errors: dict[int, str] = {}
+    for refs in references.values():
+        for ref in refs:
+            episode = ref.episode
+            ep_id = episode["episode_index"]
+            try:
+                path = _template_path(
+                    root,
+                    info["data_path"],
+                    chunk_index=episode["data/chunk_index"],
+                    file_index=episode["data/file_index"],
+                )
+                shards[path].add(ep_id)
+            except (KeyError, TypeError, ValueError) as error:
+                errors[ep_id] = str(error)
+    for path, episode_ids in sorted(shards.items()):
+        try:
+            with pq.ParquetFile(path) as parquet:
+                report.coverage["video_observation_shards_read"] = (
+                    report.coverage.get("video_observation_shards_read", 0) + 1
+                )
+                for batch in parquet.iter_batches(
+                    batch_size=_BATCH_SIZE, columns=["episode_index", "index", "timestamp"]
+                ):
+                    report.coverage["video_observation_rows_read"] = (
+                        report.coverage.get("video_observation_rows_read", 0) + batch.num_rows
+                    )
+                    records = []
+                    for row in batch.to_pylist():
+                        ep_id = row["episode_index"]
+                        if ep_id not in episode_ids:
+                            continue
+                        timestamp = row["timestamp"]
+                        if (
+                            isinstance(timestamp, bool)
+                            or not isinstance(timestamp, (int, float))
+                            or not math.isfinite(timestamp)
+                        ):
+                            errors[ep_id] = "Observation timestamp is not finite and numeric"
+                            continue
+                        records.append((ep_id, row["index"], float(timestamp)))
+                    database.executemany("INSERT INTO observations VALUES (?, ?, ?)", records)
+                    database.commit()
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            for ep_id in episode_ids:
+                errors[ep_id] = str(error)
+    database.execute("CREATE INDEX observation_episode ON observations(episode)")
+    return errors
 
 
 def _queries(
-    root: Path, info: dict[str, Any], reference: _Reference, mode: str, seed: int
+    database: sqlite3.Connection, reference: _Reference, mode: str, seed: int
 ) -> Iterator[tuple[int, float]]:
-    rows = _episode_rows(root, info, reference.episode)
+    rows = database.execute(
+        "SELECT row_index, timestamp FROM observations WHERE episode = ?",
+        (reference.episode["episode_index"],),
+    )
     if mode == "full":
         yield from rows
         return
-    # Reservoir sampling avoids reading all episode rows into memory. A stable
-    # textual seed avoids Python's randomized hash and keeps selection portable.
+    # Reservoir selection streams the on-disk index, never rereading Parquet.
     rng = random.Random(f"{seed}:{reference.camera}:{reference.episode['episode_index']}")
     reservoir: list[tuple[int, float]] = []
     for count, row in enumerate(rows):
@@ -204,9 +247,133 @@ def _nearest(database: sqlite3.Connection, timestamp: float) -> float | None:
     return min(candidates) if candidates else None
 
 
+def _spot_check_file(
+    path: Path,
+    refs: list[_Reference],
+    info: dict[str, Any],
+    report: AuditReport,
+    seed: int,
+    tolerance_s: float,
+    location: dict[str, Any],
+) -> None:
+    """Probe expected grid positions without reading rows or decoding whole files.
+
+    Budgets bound yielded decoded frames, including keyframe preroll. They cannot
+    bound codec-internal work or the time spent opening a damaged container.
+    """
+    ordered = sorted(refs, key=lambda ref: (ref.start, ref.camera, ref.episode["episode_index"]))
+    selected = ordered
+    if len(ordered) > _SPOT_INTERVALS:
+        rng = random.Random(f"{seed}:{path.name}")
+        selected = [ordered[0], *rng.sample(ordered[1:-1], _SPOT_INTERVALS - 2), ordered[-1]]
+    report.coverage["video_spot_decode_budget_per_file"] = (
+        _SPOT_INTERVALS * _SPOT_PROBES * _SPOT_DECODE_BUDGET
+    )
+    report.add(
+        "video.full_stream_integrity",
+        "not_checked",
+        "info",
+        location,
+        "Full-stream decodability, PTS ordering, interval bounds and actual observation lookups",
+        "Spot mode checks only selected metadata-derived FPS-grid positions",
+        coverage={"selected_intervals": len(selected), "referenced_intervals": len(refs)},
+        limits="Unsampled corruption, row timestamps and task visibility remain unchecked.",
+        next_action="Run --video-scan full for complete structural and video coverage.",
+    )
+    with av.open(str(path), mode="r", options={"protocol_whitelist": "file"}) as container:
+        if not container.streams.video:
+            raise ValueError("Artifact contains no video stream")
+        stream = container.streams.video[0]
+        if stream.codec_context is None or stream.time_base is None:
+            raise ValueError("Video stream lacks a codec context or time base")
+        stream.codec_context.open()
+        for reference in selected:
+            length = reference.episode["length"]
+            if not isinstance(length, int) or isinstance(length, bool) or length < 1:
+                raise ValueError("Episode length must be positive for grid probes")
+            indices = sorted({0, (length - 1) // 2, length - 1})
+            probes = []
+            dimensions = set()
+            limited = False
+            for index in indices:
+                target = reference.start + index / info["fps"]
+                container.seek(int(target / stream.time_base), stream=stream, backward=True)
+                frames = container.decode(stream)
+                nearest = None
+                budget_exhausted = True
+                decoded = 0
+                for _ in range(_SPOT_DECODE_BUDGET):
+                    frame = next(frames, None)
+                    if frame is None:
+                        budget_exhausted = False
+                        break
+                    decoded += 1
+                    report.coverage["decoded_video_frames"] = (
+                        report.coverage.get("decoded_video_frames", 0) + 1
+                    )
+                    dimensions.add((frame.height, frame.width))
+                    if frame.pts is None or frame.time_base is None:
+                        continue
+                    pts = float(frame.pts * frame.time_base)
+                    if not math.isfinite(pts):
+                        continue
+                    if reference.start - tolerance_s <= pts < reference.end:
+                        distance = abs(pts - target)
+                        nearest = distance if nearest is None else min(nearest, distance)
+                    if pts >= target:
+                        budget_exhausted = False
+                        break
+                matched = nearest is not None and nearest <= tolerance_s
+                limited |= budget_exhausted and not matched
+                probes.append(
+                    {
+                        "expected_frame_index": index,
+                        "requested_timestamp_s": target,
+                        "nearest_distance_s": nearest,
+                        "matched": matched,
+                        "decoded_frames": decoded,
+                        "decode_budget_exhausted": budget_exhausted,
+                    }
+                )
+            expected = _dimensions(reference.feature)
+            mismatch = expected is not None and any(shape != expected for shape in dimensions)
+            unmatched = any(not probe["matched"] for probe in probes)
+            if limited or expected is None:
+                report.complete = False
+            report.add(
+                "video.grid_spot_check",
+                "verified_fault"
+                if mismatch
+                else "not_checked"
+                if limited or expected is None
+                else "warning"
+                if unmatched
+                else "passed",
+                "error" if mismatch else "warning" if limited or unmatched or expected is None else "info",
+                {"file": location["file"], **reference.location},
+                "Selected metadata-derived FPS-grid targets have nearby decoded frames of declared dimensions",
+                probes,
+                measurements={"sampled_dimensions": sorted(dimensions), "declared_dimensions": expected},
+                coverage={
+                    "mode": "spot",
+                    "probes": len(probes),
+                    "frames_per_seek_budget": _SPOT_DECODE_BUDGET,
+                },
+                limits="Targets come from metadata and FPS, not observation rows. A grid miss needs a full audit; "
+                "a match cannot establish full-stream integrity, actual row coverage or visual quality.",
+                next_action="Run a full audit to resolve grid misses or exhausted seek budgets."
+                if unmatched
+                else "",
+            )
+            report.coverage["video_spot_probes"] = report.coverage.get("video_spot_probes", 0) + len(probes)
+            report.coverage["video_spot_intervals_checked"] = (
+                report.coverage.get("video_spot_intervals_checked", 0) + 1
+            )
+    report.coverage["video_files_spot_checked"] = report.coverage.get("video_files_spot_checked", 0) + 1
+
+
 def _check_reference(
     root: Path,
-    info: dict[str, Any],
     path: Path,
     reference: _Reference,
     database: sqlite3.Connection,
@@ -215,6 +382,7 @@ def _check_reference(
     video_scan: str,
     sample_seed: int,
     tolerance_s: float,
+    query_errors: dict[int, str],
 ) -> None:
     location = {"file": str(path.relative_to(root)), **reference.location}
     known_ends = [scan[key] for key in ("decoded_end_s", "stream_end_s") if scan[key] is not None]
@@ -273,7 +441,9 @@ def _check_reference(
     max_distance = 0.0
     first_bad: list[dict[str, Any]] = []
     try:
-        for row_index, timestamp in _queries(root, info, reference, video_scan, sample_seed):
+        if reference.episode["episode_index"] in query_errors:
+            raise ValueError(query_errors[reference.episode["episode_index"]])
+        for row_index, timestamp in _queries(database, reference, video_scan, sample_seed):
             requested = reference.start + timestamp
             inspected += 1
             report.coverage["video_observations_checked"] = (
@@ -361,7 +531,11 @@ def audit_videos(
     images = [key for key, feature in features.items() if feature.get("dtype") == "image"]
     report.coverage["video_cameras"] = len(cameras)
     report.coverage["video_lookup_mode"] = video_scan
-    report.coverage["video_decode_scope"] = "all frames in referenced files"
+    report.coverage["video_decode_scope"] = (
+        "bounded metadata-grid probes" if video_scan == "spot" else "all frames in referenced files"
+    )
+    report.coverage["video_observation_rows_read"] = 0
+    report.coverage["video_observations_checked"] = 0
     if images:
         report.add(
             "video.image_features",
@@ -430,47 +604,74 @@ def audit_videos(
             references[path].append(_Reference(episode, key, start, end, feature))
     report.coverage["referenced_video_files"] = len(references)
     report.coverage["referenced_video_intervals"] = sum(map(len, references.values()))
-    for path, refs in sorted(references.items()):
-        location = {
-            "file": str(path.relative_to(root)),
-            "episodes": sorted({reference.episode["episode_index"] for reference in refs}),
-        }
-        for camera in sorted({reference.camera for reference in refs}):
-            previous_reference: _Reference | None = None
-            for reference in sorted((ref for ref in refs if ref.camera == camera), key=lambda ref: ref.start):
-                if previous_reference is not None and reference.start < previous_reference.end - tolerance_s:
+    with (
+        tempfile.TemporaryDirectory(prefix="lerobot-audit-video-") as temp_dir,
+        closing(sqlite3.connect(Path(temp_dir) / "index.sqlite")) as database,
+    ):
+        query_errors = (
+            {} if video_scan == "spot" else _index_observations(root, info, references, database, report)
+        )
+        for path, refs in sorted(references.items()):
+            location = {
+                "file": str(path.relative_to(root)),
+                "episodes": sorted({reference.episode["episode_index"] for reference in refs}),
+            }
+            for camera in sorted({reference.camera for reference in refs}):
+                previous_reference: _Reference | None = None
+                for reference in sorted(
+                    (ref for ref in refs if ref.camera == camera), key=lambda ref: ref.start
+                ):
+                    if (
+                        previous_reference is not None
+                        and reference.start < previous_reference.end - tolerance_s
+                    ):
+                        report.add(
+                            "video.interval_overlap",
+                            "verified_fault",
+                            "error",
+                            {"file": location["file"], **reference.location},
+                            "Distinct episodes have nonoverlapping intervals in a shared camera video",
+                            {
+                                "previous_episode": previous_reference.episode["episode_index"],
+                                "previous_interval_s": [previous_reference.start, previous_reference.end],
+                            },
+                            next_action="Review shared-video episode offsets before training.",
+                        )
+                    if previous_reference is None or reference.end > previous_reference.end:
+                        previous_reference = reference
+            if not path.is_file():
+                report.complete = False
+                report.add(
+                    "video.file_exists",
+                    "verified_fault",
+                    "error",
+                    location,
+                    "A readable local referenced video file",
+                    "Missing or broken local reference",
+                    limits="A missing cached artifact does not establish corruption of the remote dataset.",
+                    next_action="Supply the missing local artifact and repeat the offline audit.",
+                )
+                continue
+            logger.info("Auditing video %s (%s episode references)", path.name, len(refs))
+            if video_scan == "spot":
+                try:
+                    _spot_check_file(path, refs, info, report, sample_seed, tolerance_s, location)
+                except av.error.DecoderNotFoundError as error:
+                    report.complete = False
                     report.add(
-                        "video.interval_overlap",
+                        "video.decoder", "not_checked", "error", location, "A supported decoder", str(error)
+                    )
+                except (av.error.FFmpegError, OSError, ValueError) as error:
+                    report.add(
+                        "video.decode",
                         "verified_fault",
                         "error",
-                        {"file": location["file"], **reference.location},
-                        "Distinct episodes have nonoverlapping intervals in a shared camera video",
-                        {
-                            "previous_episode": previous_reference.episode["episode_index"],
-                            "previous_interval_s": [previous_reference.start, previous_reference.end],
-                        },
-                        next_action="Review shared-video episode offsets before training.",
+                        location,
+                        "A readable video stream",
+                        str(error),
                     )
-                if previous_reference is None or reference.end > previous_reference.end:
-                    previous_reference = reference
-        if not path.is_file():
-            report.complete = False
-            report.add(
-                "video.file_exists",
-                "verified_fault",
-                "error",
-                location,
-                "A readable local referenced video file",
-                "Missing or broken local reference",
-                limits="A missing cached artifact does not establish corruption of the remote dataset.",
-                next_action="Supply the missing local artifact and repeat the offline audit.",
-            )
-            continue
-        logger.info("Auditing video %s (%s episode references)", path.name, len(refs))
-        with (
-            tempfile.TemporaryDirectory(prefix="lerobot-audit-pts-") as temp_dir,
-            closing(sqlite3.connect(Path(temp_dir) / "pts.sqlite")) as database,
-        ):
+                continue
+            database.execute("DROP TABLE IF EXISTS frames")
             try:
                 scan = _scan_pts(path, database, report)
             except av.error.DecoderNotFoundError as error:
@@ -514,7 +715,6 @@ def audit_videos(
             for reference in refs:
                 _check_reference(
                     root,
-                    info,
                     path,
                     reference,
                     database,
@@ -523,4 +723,5 @@ def audit_videos(
                     video_scan,
                     sample_seed,
                     tolerance_s,
+                    query_errors,
                 )

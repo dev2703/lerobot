@@ -120,6 +120,16 @@ Use realistic tasks with known outcomes:
 
 Compare the same tasks with and without skill instructions. Record task completion, unsupported claims, unsafe actions, user interventions, and elapsed time. Treat small evaluation sets as engineering evidence, not broad performance claims.
 
+The [policy-diagnosis PR](https://github.com/dev2703/lerobot/pull/3) provides a
+runnable paired evaluation harness (`scripts/evaluate_agent_skills.py`) and its
+procedure (`docs/agent-skill-evaluation.md`). It snapshots instructions, prepares
+matched synthetic evidence tasks, captures actual runner transcripts and elapsed
+time, and validates independent adjudications of routing, completion, unsupported
+claims, unsafe actions, and user interventions. Harness unit tests validate
+bookkeeping only; small actual pilots do not establish general improvement.
+Video perception, helper execution, and hardware outcomes remain separate
+evaluations.
+
 ## 3. Skill A — Dataset audit
 
 ### 3.1 Trigger and exclusions
