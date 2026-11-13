@@ -4,9 +4,17 @@ This file is a practical, copy-paste-friendly companion for any AI agent (Cursor
 
 ---
 
-## 1. Start here — ask the user first (MANDATORY)
+## 1. Start here — use the task and existing context
 
-Before suggesting any command, an agent MUST ask the user at least these questions and wait for answers:
+For local demonstration quality, wrist-camera framing, or occlusion concerns, use
+the [recording-review skill](skills/lerobot-recording-review/SKILL.md) and its
+[offline review commands](skills/lerobot-recording-review/references/review.md).
+It provides reproducible still sampling, bounded event clips, and validated human
+decisions. Numeric screening does not establish task success or useful framing.
+
+Reuse information already supplied. Ask only for missing context that affects
+the next step. For a new setup or training request, establish the relevant parts
+of the following:
 
 1. **What's your goal?** (e.g. "teach my SO-101 to fold a cloth", "train a policy on an existing HF dataset", "contribute a PR", "understand the codebase")
 2. **What hardware do you have?**
@@ -20,7 +28,9 @@ Before suggesting any command, an agent MUST ask the user at least these questio
 5. **Do you already have a dataset?** Yes (HF repo id?) / no / want to record one
 6. **How can I help right now?** (pick one concrete next step)
 
-Only after you have answers, propose a concrete path. If something is ambiguous, ask again rather than guessing. Bias toward **the simplest thing that works** for the user's hardware and goal.
+Propose a concrete path once the relevant information is available. Keep
+unknowns explicit and continue useful local inspection while semantic context
+is pending.
 
 If their robot, teleoperator, or camera isn't natively supported, check the community plugins in [`third_party_robots.mdx`](./docs/source/third_party_robots.mdx) and [`third_party_sensors.mdx`](./docs/source/third_party_sensors.mdx) before proposing a custom integration. If nothing fits, follow [`integrate_hardware.mdx`](./docs/source/integrate_hardware.mdx).
 
