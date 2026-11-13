@@ -18,7 +18,7 @@ exist. Camera roles come from the user or recording configuration. Neither
 `iphone` nor `wrist` proves a camera is wrist-mounted.
 
 Use `--export-frames` when visual inspection is authorized and useful. This writes
-private sampled PNGs alongside the report; it does not upload them. Output must
+private sampled PNG files alongside the report; it does not upload them. Output must
 be a new directory outside both the dataset and repository. Defaults export no
 frames and copy no task strings. Reports should also stay private. Exit `0`
 means numeric sampling completed within its stated scope, with pending semantic
