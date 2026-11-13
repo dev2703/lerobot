@@ -4,23 +4,32 @@ This file is a practical, copy-paste-friendly companion for any AI agent (Cursor
 
 ---
 
-## 1. Start here — ask the user first (MANDATORY)
+## 1. Start with the current task
 
-Before suggesting any command, an agent MUST ask the user at least these questions and wait for answers:
+Use the user's goal and information already available in the conversation,
+configuration, and repository. Ask only for missing information that changes the
+next step. Recording needs robot, teleoperator, camera, and task details; training
+choices need the dataset, compute, and intended outcome. Local policy diagnosis
+can begin with the available checkpoint/configuration and failure symptom.
+Preserve authorization already given and proceed with useful local inspection.
 
-1. **What's your goal?** (e.g. "teach my SO-101 to fold a cloth", "train a policy on an existing HF dataset", "contribute a PR", "understand the codebase")
-2. **What hardware do you have?**
-   - Robot: none / SO-100 / SO-101 / Koch / LeKiwi / Reachy / other
-   - Teleop: leader arm / phone / keyboard / gamepad / none
-   - Cameras: how many, resolution, fixed or moving?
-3. **What machine will you train on?**
-   - GPU model + VRAM (e.g. "laptop 3060 6 GB", "RTX 4090 24 GB", "A100 80 GB", "CPU only")
-   - OS: macOS / Linux / Windows
-4. **Skill level & time budget?** First time, some ML, experienced? Hours, days, a weekend?
-5. **Do you already have a dataset?** Yes (HF repo id?) / no / want to record one
-6. **How can I help right now?** (pick one concrete next step)
+For an **ACT or SmolVLA policy that trains or runs but fails its task**, use
+[`lerobot-policy-diagnosis`](./skills/lerobot-policy-diagnosis/SKILL.md). It checks
+artifact identity and observation/action compatibility, ranks evidence-backed
+hypotheses, and proposes the smallest distinguishing experiments. Its
+[evidence helper](./skills/lerobot-policy-diagnosis/references/evidence.md)
+produces a bounded private summary from explicitly extracted facts without
+loading models, copying recordings, or accessing hardware. Missing evidence is
+reported explicitly; offline loss does not establish closed-loop success.
 
-Only after you have answers, propose a concrete path. If something is ambiguous, ask again rather than guessing. Bias toward **the simplest thing that works** for the user's hardware and goal.
+For maintainers changing skill instructions, the
+[paired agent evaluation](./docs/agent-skill-evaluation.md) compares routing,
+conclusions, interventions, and elapsed time on the same synthetic tasks with
+and without instructions. Helper tests alone do not measure agent behavior.
+
+A diagnostic request does not authorize downloads, training, uploads, dataset
+changes, hardware access, or robot movement. Follow the current task's scope and
+the skill's boundaries.
 
 If their robot, teleoperator, or camera isn't natively supported, check the community plugins in [`third_party_robots.mdx`](./docs/source/third_party_robots.mdx) and [`third_party_sensors.mdx`](./docs/source/third_party_sensors.mdx) before proposing a custom integration. If nothing fits, follow [`integrate_hardware.mdx`](./docs/source/integrate_hardware.mdx).
 
