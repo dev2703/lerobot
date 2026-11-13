@@ -122,6 +122,166 @@ def test_no_network_or_input_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert not list(output.rglob("*.png"))
 
 
+def test_ffmpeg_nested_network_protocol_is_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    # FFmpeg's native HTTP implementation does not use Python's socket module.
+    # A real HLS suffix also works with builds that disable content sniffing for
+    # nonstandard extensions before they reach the protocol allowlist.
+    video = next(root.rglob("*.mp4"))
+    video.rename(video.with_suffix(".m3u8"))
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["video_path"] = info["video_path"].replace(".mp4", ".m3u8")
+    path.write_text(json.dumps(info))
+    video.with_suffix(".m3u8").write_text(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nhttp://127.0.0.1:9/segment.ts\n#EXT-X-ENDLIST\n"
+    )
+    original_open = reviewer.av.open
+    options = []
+
+    def observed_open(*args: Any, **kwargs: Any) -> Any:
+        options.append(kwargs.get("options"))
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(reviewer.av, "open", observed_open)
+    previous_level = av.logging.get_level()
+    av.logging.set_level(av.logging.ERROR)
+    try:
+        with av.logging.Capture() as logs:
+            report = reviewer.review(root, clip_requests=((0, CAMERA, 0.75),))
+    finally:
+        av.logging.set_level(previous_level)
+    assert options == [{"protocol_whitelist": "file"}] * 3
+    assert any("not on whitelist" in entry[2] for entry in logs), logs
+    assert report["status"] == "incomplete"
+    assert report["coverage"]["sampled_frames"] == report["coverage"]["clip_frames"] == 0
+
+
+def test_multiple_stills_reuse_decoder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    original_open = reviewer.av.open
+    paths = []
+
+    def observed_open(path: str, *args: Any, **kwargs: Any) -> Any:
+        paths.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(reviewer.av, "open", observed_open)
+    report = reviewer.review(root, samples_per_episode=8)
+    assert report["coverage"]["sampled_frames"] == 16
+    assert len(paths) == 2  # One open per episode-camera group, rather than per still.
+
+
+@pytest.mark.parametrize("storage_format", [None, "lerobot", ""])
+def test_upstream_default_storage_declarations(tmp_path: Path, storage_format: str | None) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["storage_format"] = storage_format
+    path.write_text(json.dumps(info))
+    report = reviewer.review(root)
+    assert report["status"] == "sampled"
+    assert report["coverage"]["sampled_frames"] == 10
+
+
+@pytest.mark.parametrize("storage_format", ["parquet", "lance", "unknown"])
+def test_unsupported_storage_is_explicit(tmp_path: Path, storage_format: str) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    path = root / "meta/info.json"
+    info = json.loads(path.read_text())
+    info["storage_format"] = storage_format
+    path.write_text(json.dumps(info))
+    report = reviewer.review(root)
+    assert report["status"] == "incomplete"
+    assert report["coverage"]["sampled_frames"] == 0
+    assert "lerobot storage" in report["unavailable"][0]
+
+
+def test_targeted_clip_finds_transient_missed_by_sparse_stills(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path / "dataset", "brief-occlusion")
+    before = hashes(root)
+    sparse = reviewer.review(root)
+    assert not any(item["check_id"] == "recording.dark" for item in sparse["queue"])
+    report = reviewer.review(
+        root, clip_requests=((0, CAMERA, 0.75),), clip_radius_s=0.5, clip_export_dir=tmp_path / "clips"
+    )
+    clip = report["clips"][0]
+    assert report["status"] == "sampled"
+    assert clip["clip_id"] == "clip-0" and clip["status"] == "complete"
+    assert clip["requested_interval_s"] == [0.25, 1.25]
+    assert clip["actual_interval_s"] == [0.25, 1]
+    assert [f["episode_time_s"] for f in clip["frames"]] == [0.25, 0.5, 0.75, 1]
+    assert report["coverage"]["clip_frames"] == 4
+    assert report["coverage"]["semantic_reviewed_frames"] == 0
+    dark = [item for item in report["queue"] if item["check_id"] == "recording.dark"]
+    assert len(dark) == 1 and dark[0]["interval_s"] == [0.75, 0.75]
+    assert dark[0]["evidence"]["clip_id"] == clip["clip_id"]
+    assert dark[0]["classification"] == "hypothesis"
+    with av.open(str(tmp_path / clip["clip_path"])) as exported:
+        assert len(list(exported.decode(video=0))) == 4
+    assert hashes(root) == before
+
+
+def test_clip_uses_episode_offset_and_can_select_unsampled_episode(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    report = reviewer.review(root, max_episodes=1, clip_requests=((1, CAMERA, 0.5),), clip_radius_s=0.5)
+    clip = report["clips"][0]
+    assert report["status"] == "sampled"
+    assert clip["video_offset_s"] == 2
+    assert clip["frames"][0]["video_pts_s"] == 2
+    assert clip["frames"][0]["episode_time_s"] == 0
+
+
+def test_clip_decode_budget_retains_partial_evidence(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path / "dataset")
+    report = reviewer.review(root, clip_requests=((0, CAMERA, 1),), clip_radius_s=1, max_clip_frames=2)
+    clip = report["clips"][0]
+    assert report["status"] == "incomplete" and clip["status"] == "partial"
+    assert clip["decoded_frames"] == report["coverage"]["clip_decoded_frames"] == 2
+    assert len(clip["frames"]) == 2
+    assert report["coverage"]["semantic_reviewed_frames"] == 0
+
+
+def test_clip_decode_budget_includes_keyframe_preroll(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path / "dataset", "frozen")
+    report = reviewer.review(root, clip_requests=((0, CAMERA, 1.5),), clip_radius_s=0.25, max_clip_frames=1)
+    clip = report["clips"][0]
+    assert report["status"] == "incomplete" and clip["status"] == "unavailable"
+    assert clip["decoded_frames"] == report["coverage"]["clip_decoded_frames"] == 1
+    assert not clip["frames"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"clip_radius_s": 0},
+        {"clip_radius_s": 3},
+        {"max_clip_seconds": 31},
+        {"max_clip_frames": 0},
+        {"max_clip_frames": 3001},
+        {"clip_radius_s": float("nan")},
+        {"max_clip_seconds": float("inf")},
+        {"clip_requests": ((0, CAMERA, 0.5),) * 11},
+    ],
+)
+def test_clip_budgets_are_bounded(tmp_path: Path, kwargs: dict[str, Any]) -> None:
+    report = reviewer.review(make_dataset(tmp_path / "dataset"), **kwargs)
+    assert report["status"] == "incomplete"
+    assert not report["samples"] and not report["clips"]
+    json.dumps(report, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "clip_request", [(9, CAMERA, 0.5), (0, "missing", 0.5), (0, CAMERA, -0.5), (0, CAMERA, float("nan"))]
+)
+def test_invalid_clip_requests_preserve_stills(tmp_path: Path, clip_request: tuple[int, str, float]) -> None:
+    report = reviewer.review(make_dataset(tmp_path / "dataset"), clip_requests=(clip_request,))
+    assert report["status"] == "incomplete"
+    assert report["coverage"]["sampled_frames"] == 10
+    assert report["clips"][0]["status"] == "unavailable"
+    json.dumps(report, allow_nan=False)
+
+
 @pytest.mark.parametrize("mode", ["moving", "frozen", "brief-occlusion"])
 def test_pixel_metrics_never_decide_wrist_task_visibility(tmp_path: Path, mode: str) -> None:
     # A moving view of irrelevant workspace and a useful view can have identical statistics.
@@ -185,17 +345,18 @@ def test_missing_decoder_dependency(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_interruption_keeps_partial_samples(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = make_dataset(tmp_path / "dataset")
-    original = reviewer.read_preview
+    original = reviewer.read_previews
     calls = 0
 
     def interrupted(*args: Any) -> Any:
         nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise KeyboardInterrupt
-        return original(*args)
+        for sample in original(*args):
+            calls += 1
+            if calls == 2:
+                raise KeyboardInterrupt
+            yield sample
 
-    monkeypatch.setattr(reviewer, "read_preview", interrupted)
+    monkeypatch.setattr(reviewer, "read_previews", interrupted)
     report = reviewer.review(root)
     assert report["status"] == "incomplete"
     assert report["coverage"]["sampled_frames"] == 1
@@ -427,6 +588,34 @@ def test_cli_success_and_incomplete_exit_codes(tmp_path: Path, monkeypatch: pyte
             args += ["--expected-camera", "absent"]
         monkeypatch.setattr(sys, "argv", args)
         assert reviewer.main() == expected
+
+
+def test_cli_exports_targeted_clip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = make_dataset(tmp_path / "dataset", "brief-occlusion")
+    output = tmp_path / "report"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--root",
+            str(root),
+            "--output-dir",
+            str(output),
+            "--clip",
+            "0",
+            CAMERA,
+            "0.75",
+            "--clip-radius-s",
+            "0.5",
+            "--export-clips",
+        ],
+    )
+    assert reviewer.main() == 0
+    report = json.loads((output / "review.json").read_text())
+    assert (output / report["clips"][0]["clip_path"]).is_file()
+    assert report["clips"][0]["status"] == "complete"
+    assert "clip-0" in (output / "review.md").read_text()
 
 
 @pytest.mark.parametrize("budgets", [{"max_episodes": 0}, {"samples_per_episode": -1}])

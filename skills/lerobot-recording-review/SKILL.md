@@ -25,8 +25,10 @@ do not treat full decoding as full visual review.
 3. When local visual inspection is available and within the user's scope, export
    selected frames to a private directory outside the dataset and repository,
    then inspect them. Review each camera across task phases and compare views.
-   If sparse stills cannot distinguish a failure, request or inspect the smallest
-   relevant clip. If vision is unavailable, report numeric evidence only.
+   If sparse stills cannot distinguish a failure, use the helper's bounded
+   `--clip EPISODE CAMERA CENTER_SECONDS` inspection and `--export-clips` for the
+   smallest relevant interval. Report actual clip timestamps and any exhausted
+   decode budget. If vision is unavailable, report numeric evidence only.
 4. Add evidence-backed hypotheses for possible failed grasps, visibility loss,
    idle segments, inconsistent approaches, or limited starting variation only
    when supported. Preserve successful variation and missing evidence. In
@@ -37,6 +39,10 @@ do not treat full decoding as full visual review.
    interpretations, and disposition (`pending`, `accepted`, `rejected`). Record
    explicit human decisions separately from source data. Acceptance means the
    flag was useful, not that an episode should be deleted.
+   Use `scripts/review_decisions.py` to validate the supplied decision snapshot,
+   recompute acceptance/pending counts, and credit only explicitly attested visual
+   inspections. Never invent human decisions or infer inspected intervals from a
+   disposition alone.
 
 Every automatic flag is a review candidate, not a task-success label. A clean
 numeric sample cannot establish useful framing: a moving wrist view of the wrong

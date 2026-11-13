@@ -10,13 +10,16 @@ import importlib.metadata
 import json
 import math
 import random
+from collections.abc import Iterator
+from contextlib import ExitStack
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 try:
-    import av
-    import numpy as np
-    import pyarrow.parquet as pq
+    av: Any = importlib.import_module("av")
+    np: Any = importlib.import_module("numpy")
+    pq: Any = importlib.import_module("pyarrow.parquet")
 except ImportError:
     av = np = pq = None
 
@@ -62,24 +65,98 @@ def sample_indices(length: int, budget: int) -> list[int]:
     return [round(i * (length - 1) / (count - 1)) for i in range(count)]
 
 
-def read_preview(path: Path, target: float, start: float, end: float) -> tuple[Any, Any, float]:
-    """Seek a single nearest frame within the episode's source-video interval."""
-    with av.open(str(path)) as container:
+def read_previews(
+    path: Path, targets: list[float], start: float, end: float
+) -> Iterator[tuple[Any, Any, float]]:
+    """Reuse one local-only decoder for all requested stills from this interval."""
+    # Python socket mocks cannot stop FFmpeg's native or nested protocol I/O.
+    with av.open(str(path), mode="r", options={"protocol_whitelist": "file"}) as container:
         stream = container.streams.video[0]
-        container.seek(int(target / stream.time_base), stream=stream, backward=True)
-        best, best_pts, distance = None, None, math.inf
+        for target in targets:
+            container.seek(int(target / stream.time_base), stream=stream, backward=True)
+            best, best_pts, distance = None, None, math.inf
+            for frame in container.decode(stream):
+                if frame.pts is None:
+                    continue
+                pts = float(frame.pts * frame.time_base)
+                if start - TOLERANCE_S <= pts < end and abs(pts - target) < distance:
+                    best, best_pts, distance = frame, pts, abs(pts - target)
+                if pts >= target:
+                    break
+            if best is None or best_pts is None or distance > TOLERANCE_S:
+                raise ValueError("No sampled frame within the recorded PTS tolerance")
+            gray = best.reformat(width=64, height=64, format="gray").to_ndarray().astype("float32")
+            yield gray, best, best_pts
+
+
+def inspect_clip(
+    path: Path,
+    start: float,
+    end: float,
+    offset: float,
+    fps: float,
+    max_frames: int,
+    export_path: Path | None = None,
+) -> dict[str, Any]:
+    """Decode a contiguous bounded window, counting keyframe pre-roll in the budget."""
+    result: dict[str, Any] = {"frames": [], "decoded_frames": 0, "complete": False}
+    with ExitStack() as stack:
+        container = stack.enter_context(av.open(str(path), mode="r", options={"protocol_whitelist": "file"}))
+        stream = container.streams.video[0]
+        container.seek(int(start / stream.time_base), stream=stream, backward=True)
+        output = encoder = None
+        first_pts = None
+        last_frame_end = None
+        if export_path is not None:
+            output = stack.enter_context(av.open(str(export_path), mode="w"))
+            encoder = output.add_stream("mpeg4", rate=Fraction(str(fps)).limit_denominator(100000))
+            encoder.width, encoder.height = stream.codec_context.width, stream.codec_context.height
+            encoder.pix_fmt = "yuv420p"
+            encoder.codec_context.time_base = Fraction(1, 60000)
         for frame in container.decode(stream):
-            if frame.pts is None:
-                continue
-            pts = float(frame.pts * frame.time_base)
-            if start - TOLERANCE_S <= pts < end and abs(pts - target) < distance:
-                best, best_pts, distance = frame, pts, abs(pts - target)
-            if pts >= target:
+            result["decoded_frames"] += 1
+            if frame.pts is not None and frame.time_base is not None:
+                pts = float(frame.pts * frame.time_base)
+                if pts >= end - TOLERANCE_S:
+                    result["complete"] = True
+                    break
+                if start - TOLERANCE_S <= pts < end:
+                    duration = getattr(frame, "duration", 0)
+                    tail_duration = (
+                        float(duration * frame.time_base)
+                        if duration and duration > 0
+                        else float(1 / stream.average_rate)
+                        if stream.average_rate
+                        else None
+                    )
+                    last_frame_end = pts + tail_duration if tail_duration is not None else None
+                    gray = frame.reformat(width=64, height=64, format="gray").to_ndarray()
+                    result["frames"].append(
+                        {
+                            "episode_time_s": pts - offset,
+                            "video_pts_s": pts,
+                            "gray_mean": float(gray.mean()),
+                            "gray_std": float(gray.std()),
+                        }
+                    )
+                    if output is not None and encoder is not None:
+                        first_pts = pts if first_pts is None else first_pts
+                        exported = av.VideoFrame.from_ndarray(
+                            frame.to_ndarray(format="rgb24"), format="rgb24"
+                        )
+                        exported.pts = round((pts - first_pts) * 60000)
+                        exported.time_base = Fraction(1, 60000)
+                        for packet in encoder.encode(exported):
+                            output.mux(packet)
+            if result["decoded_frames"] >= max_frames:
                 break
-        if best is None or distance > TOLERANCE_S:
-            raise ValueError("No sampled frame within the recorded PTS tolerance")
-        gray = best.reformat(width=64, height=64, format="gray").to_ndarray().astype("float32")
-        return gray, best, best_pts
+        else:
+            # Reaching EOF only covers the request if its final frame was present.
+            result["complete"] = last_frame_end is not None and last_frame_end >= end - TOLERANCE_S
+        if output is not None and encoder is not None and result["frames"]:
+            for packet in encoder.encode():
+                output.mux(packet)
+    return result
 
 
 def candidate(
@@ -122,6 +199,11 @@ def review(
     seed: int = 17,
     expected_cameras: tuple[str, ...] = (),
     export_dir: Path | None = None,
+    clip_requests: tuple[tuple[int, str, float], ...] = (),
+    clip_radius_s: float = 1,
+    max_clip_seconds: float = 5,
+    max_clip_frames: int = 300,
+    clip_export_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Inspect local metadata and sampled frames; preserve partial evidence on failure."""
     root = root.expanduser().resolve()
@@ -137,6 +219,9 @@ def review(
             "dark_mean_below": 12,
             "low_contrast_std_below": 4,
             "little_change_mad_below": 1,
+            "clip_radius_s": clip_radius_s if math.isfinite(clip_radius_s) else None,
+            "max_clip_seconds": max_clip_seconds if math.isfinite(max_clip_seconds) else None,
+            "max_clip_frames": max_clip_frames,
         },
         "coverage": {
             "selected_episodes": [],
@@ -146,8 +231,13 @@ def review(
             "semantic_reviewed_frames": 0,
             "full_video_scan": False,
             "structural_audit": "not_checked",
+            "requested_clips": len(clip_requests),
+            "clip_frames": 0,
+            "clip_decoded_frames": 0,
+            "inspected_clip_intervals": [],
         },
         "samples": [],
+        "clips": [],
         "queue": [],
         "unavailable": [],
         "limits": "Numeric samples cannot establish task visibility, grasp success, continuous idleness, "
@@ -156,11 +246,24 @@ def review(
     try:
         if max_episodes < 1 or samples_per_episode < 1:
             raise ValueError("Sample budgets must be positive")
-        if export_dir is not None:
-            export_dir = export_dir.resolve()
-            if export_dir == root or export_dir.is_relative_to(root) or root.is_relative_to(export_dir):
-                raise ValueError("Frame output must be outside the dataset")
-            export_dir.mkdir(parents=True, exist_ok=False)
+        if (
+            len(clip_requests) > 10
+            or not math.isfinite(clip_radius_s)
+            or not math.isfinite(max_clip_seconds)
+            or clip_radius_s <= 0
+            or not 0 < max_clip_seconds <= 30
+            or 2 * clip_radius_s > max_clip_seconds
+            or not 1 <= max_clip_frames <= 3000
+        ):
+            raise ValueError(
+                "Clips require <=10 windows, positive radius, <=30 seconds and <=3000 decode frames"
+            )
+        for directory in (export_dir, clip_export_dir):
+            if directory is not None:
+                directory = directory.resolve()
+                if directory == root or directory.is_relative_to(root) or root.is_relative_to(directory):
+                    raise ValueError("Preview output must be outside the dataset")
+                directory.mkdir(parents=True, exist_ok=False)
         if av is None or np is None or pq is None:
             raise RuntimeError(
                 "Required dependencies unavailable: NumPy, PyArrow, PyAV; no installation attempted"
@@ -172,8 +275,9 @@ def review(
         if not isinstance(info, dict):
             raise ValueError("Dataset metadata must be a JSON object")
         report["format"] = info.get("codebase_version")
-        if info.get("codebase_version") != "v3.0" or info.get("storage_format", "parquet") != "parquet":
-            raise ValueError("Only v3.0 Parquet episode metadata is supported")
+        storage_format = info.get("storage_format") or "lerobot"
+        if info.get("codebase_version") != "v3.0" or storage_format != "lerobot":
+            raise ValueError("Only v3.0 lerobot storage with Parquet episode metadata is supported")
         fps = float(info["fps"])
         if not math.isfinite(fps) or fps <= 0:
             raise ValueError("FPS must be finite and positive")
@@ -248,8 +352,10 @@ def review(
                         file_index=row[f"{prefix}/file_index"],
                     )
                     path = local_path(root, relative)
-                    for sample_index, time in enumerate(times):
-                        gray, frame, pts = read_preview(path, start + time, start, end)
+                    frames = read_previews(path, [start + time for time in times], start, end)
+                    for sample_index, (time, (gray, frame, pts)) in enumerate(
+                        zip(times, frames, strict=True)
+                    ):
                         sample = {
                             "episode_index": episode,
                             "camera": camera,
@@ -333,6 +439,100 @@ def review(
                         )
                         entry["check_id"] = "recording.little-change"
                         report["queue"].append(entry)
+        for request_index, (episode, camera, center) in enumerate(clip_requests):
+            clip: dict[str, Any] = {
+                "clip_id": f"clip-{request_index}",
+                "episode_index": episode,
+                "camera": camera,
+                "center_s": center if math.isfinite(center) else None,
+                "status": "unavailable",
+                "complete": False,
+                "frames": [],
+            }
+            report["clips"].append(clip)
+            try:
+                if episode not in episodes or camera not in cameras:
+                    raise ValueError("Clip episode or RGB camera is unavailable")
+                row = episodes[episode]
+                length = row["length"]
+                if not isinstance(length, int) or length < 1:
+                    raise ValueError("Invalid clip episode length")
+                if not math.isfinite(center) or not 0 <= center < length / fps:
+                    raise ValueError("Clip center must lie inside the episode")
+                prefix = f"videos/{camera}"
+                offset = float(row[f"{prefix}/from_timestamp"])
+                source_end = float(row[f"{prefix}/to_timestamp"])
+                if not all(math.isfinite(t) for t in (offset, source_end)) or not 0 <= offset < source_end:
+                    raise ValueError("Invalid clip source-video interval")
+                start = max(0, center - clip_radius_s)
+                end = min(length / fps, source_end - offset, center + clip_radius_s)
+                if end <= start:
+                    raise ValueError("Clip has no source-video interval")
+                relative = info["video_path"].format(
+                    video_key=camera,
+                    chunk_index=row[f"{prefix}/chunk_index"],
+                    file_index=row[f"{prefix}/file_index"],
+                )
+                clip.update(requested_interval_s=[start, end], video_offset_s=offset, video_path=relative)
+                filename = f"{clip['clip_id']}.mp4"
+                inspection = inspect_clip(
+                    local_path(root, relative),
+                    offset + start,
+                    offset + end,
+                    offset,
+                    fps,
+                    max_clip_frames,
+                    clip_export_dir / filename if clip_export_dir is not None else None,
+                )
+                clip.update(inspection)
+                report["coverage"]["clip_frames"] += len(clip["frames"])
+                report["coverage"]["clip_decoded_frames"] += clip["decoded_frames"]
+                if not clip["frames"]:
+                    raise ValueError("No frames decoded within the requested clip interval and decode budget")
+                clip["status"] = "complete" if clip["complete"] else "partial"
+                clip["actual_interval_s"] = [
+                    clip["frames"][0]["episode_time_s"],
+                    clip["frames"][-1]["episode_time_s"],
+                ]
+                if clip_export_dir is not None:
+                    clip["clip_path"] = f"clips/{filename}"
+                report["coverage"]["inspected_clip_intervals"].append(
+                    {
+                        "clip_id": clip["clip_id"],
+                        "episode_index": episode,
+                        "camera": camera,
+                        "interval_s": clip["actual_interval_s"],
+                        "semantic_review": "pending",
+                    }
+                )
+                if not clip["complete"]:
+                    report["unavailable"].append(
+                        f"{clip['clip_id']}: decode budget or source EOF prevented complete clip coverage"
+                    )
+                for check, metric, threshold in (("dark", "gray_mean", 12), ("low-contrast", "gray_std", 4)):
+                    flagged = [frame for frame in clip["frames"] if frame[metric] < threshold]
+                    if flagged:
+                        entry = candidate(
+                            episode,
+                            camera,
+                            cameras.index(camera),
+                            f"{check}-{clip['clip_id']}",
+                            [frame["episode_time_s"] for frame in flagged],
+                            {
+                                "clip_id": clip["clip_id"],
+                                "metric": metric,
+                                "threshold_below": threshold,
+                                "values": [frame[metric] for frame in flagged],
+                                "units": "gray_0_255",
+                            },
+                            "Brief occlusion, exposure changes, or uniform backgrounds may be legitimate; "
+                            "inspect the clip and other cameras before judging task success.",
+                        )
+                        entry["check_id"] = f"recording.{check}"
+                        report["queue"].append(entry)
+            except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+                clip["error"] = f"{type(exc).__name__}: {exc}"
+                report["unavailable"].append(f"{clip['clip_id']}: {clip['error']}")
         report["status"] = "incomplete" if report["unavailable"] else "sampled"
     except KeyboardInterrupt:
         report["unavailable"].append("Sampling interrupted; retained evidence is partial")
@@ -380,6 +580,9 @@ def write_report(report: dict[str, Any], output: Path) -> None:
                 "",
             ]
         )
+    lines.extend(["## Targeted clips", "", "Numeric inspection only; semantic review remains pending.", ""])
+    for clip in report.get("clips", []):
+        lines.extend(["```json", json.dumps(clip), "```", ""])
     lines.extend(["## Unavailable evidence", "", "```json", json.dumps(report["unavailable"]), "```", ""])
     (output / "review.md").write_text("\n".join(lines))
 
@@ -394,7 +597,20 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--expected-camera", action="append", default=[])
     parser.add_argument("--export-frames", action="store_true")
+    parser.add_argument(
+        "--clip", nargs=3, action="append", default=[], metavar=("EPISODE", "CAMERA", "CENTER_SECONDS")
+    )
+    parser.add_argument("--clip-radius-s", type=float, default=1)
+    parser.add_argument("--max-clip-seconds", type=float, default=5)
+    parser.add_argument("--max-clip-frames", type=int, default=300)
+    parser.add_argument("--export-clips", action="store_true")
     args = parser.parse_args()
+    try:
+        clip_requests = tuple((int(episode), camera, float(center)) for episode, camera, center in args.clip)
+    except ValueError:
+        parser.error("Clip episode and center must be an integer and a number respectively")
+    if args.export_clips and not clip_requests:
+        parser.error("--export-clips requires at least one --clip")
     root, output = args.root.expanduser().resolve(), args.output_dir.expanduser().resolve()
     repository = Path(__file__).resolve().parents[3]
     if any(output == p or output.is_relative_to(p) or p.is_relative_to(output) for p in (root, repository)):
@@ -410,6 +626,11 @@ def main() -> int:
         seed=args.seed,
         expected_cameras=tuple(args.expected_camera),
         export_dir=output / "frames" if args.export_frames else None,
+        clip_requests=clip_requests,
+        clip_radius_s=args.clip_radius_s,
+        max_clip_seconds=args.max_clip_seconds,
+        max_clip_frames=args.max_clip_frames,
+        clip_export_dir=output / "clips" if args.export_clips else None,
     )
     write_report(report, output)
     return 0 if report["status"] == "sampled" else 2
