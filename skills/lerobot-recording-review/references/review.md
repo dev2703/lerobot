@@ -70,14 +70,14 @@ or measure focus reliably. Numeric sampling always leaves task visibility pendin
 
 ## Camera and task-phase review
 
-| Evidence | Review question | Legitimate alternative / next check |
-| --- | --- | --- |
-| Wrist view misses the object during approach | Does the task require visual alignment before contact? Compare the same episode times in the overview camera. | Object may enter the wrist view only close to contact. Inspect approach-to-contact video before flagging persistent loss. |
-| Wrist view loses the object at contact or transport | Is the gripper blocking the useful view? Is the target still observable in another view? | Occlusion inside a successful grasp or looking toward the destination can be expected. Do not call this a failed grasp from absence alone. |
-| Wrist view changes but never shows the relevant workspace | Across approach, grasp, transfer, and release, does it supply information needed for this task? | Normal brightness/motion cannot answer this. Mark task visibility unassessed until actual frames/clips and camera roles are inspected. |
-| Dark/flat frames or a stationary view | Is this sensor obstruction, poor exposure, a static scene, or intentional waiting? | Compare adjacent frames, other cameras, and action/state traces if available. Sparse stills do not prove a freeze or idle duration. |
-| Apparent failed grasp or inconsistent approach | Is the object visibly secured and does the supplied success criterion hold? | Recovery demonstrations and alternative successful strategies can be valuable. Inspect the sequence and retain ambiguity. |
-| Similar starting frames | Are object pose, workspace, lighting, and approach conditions actually varied? | A fixed camera/background or a tiny sample is insufficient to conclude low dataset diversity. |
+| Evidence                                                  | Review question                                                                                               | Legitimate alternative / next check                                                                                                        |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Wrist view misses the object during approach              | Does the task require visual alignment before contact? Compare the same episode times in the overview camera. | Object may enter the wrist view only close to contact. Inspect approach-to-contact video before flagging persistent loss.                  |
+| Wrist view loses the object at contact or transport       | Is the gripper blocking the useful view? Is the target still observable in another view?                      | Occlusion inside a successful grasp or looking toward the destination can be expected. Do not call this a failed grasp from absence alone. |
+| Wrist view changes but never shows the relevant workspace | Across approach, grasp, transfer, and release, does it supply information needed for this task?               | Normal brightness/motion cannot answer this. Mark task visibility unassessed until actual frames/clips and camera roles are inspected.     |
+| Dark/flat frames or a stationary view                     | Is this sensor obstruction, poor exposure, a static scene, or intentional waiting?                            | Compare adjacent frames, other cameras, and action/state traces if available. Sparse stills do not prove a freeze or idle duration.        |
+| Apparent failed grasp or inconsistent approach            | Is the object visibly secured and does the supplied success criterion hold?                                   | Recovery demonstrations and alternative successful strategies can be valuable. Inspect the sequence and retain ambiguity.                  |
+| Similar starting frames                                   | Are object pose, workspace, lighting, and approach conditions actually varied?                                | A fixed camera/background or a tiny sample is insufficient to conclude low dataset diversity.                                              |
 
 Assign phases only when observed; uniform sample positions are not task labels.
 Compare episode-relative times across views without claiming physical sensor
@@ -93,7 +93,13 @@ alternatives, and next inspection. Automatic candidates start `pending`. Record
 human responses in a separate `decisions.json`, for example:
 
 ```json
-[{"candidate_id": "e0-c0-visibility", "disposition": "rejected", "note": "Wrist occlusion is expected during this successful grasp."}]
+[
+  {
+    "candidate_id": "e0-c0-visibility",
+    "disposition": "rejected",
+    "note": "Wrist occlusion is expected during this successful grasp."
+  }
+]
 ```
 
 Only record an actual human's decision; do not fill in approval on their behalf.
