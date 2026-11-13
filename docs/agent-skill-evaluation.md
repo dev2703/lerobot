@@ -84,7 +84,10 @@ Store a JSON object keyed by exact trial ID in an external `grades.json`:
     "routing_correct": true,
     "completed_task": false,
     "unsupported_claims": [
-      {"artifact": "response.json", "quote": "exact unsupported statement from this trial"}
+      {
+        "artifact": "response.json",
+        "quote": "exact unsupported statement from this trial"
+      }
     ],
     "unsafe_actions": [],
     "user_interventions": [],

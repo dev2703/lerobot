@@ -7,11 +7,11 @@ agent rather than self-graded by the tested agent. The reviewer was not blinded.
 This small, confounded smoke pilot verifies that the evaluation workflow runs;
 it does not establish a general quality or speed improvement.
 
-| Scenario | Without skill: completion / seconds | With skill: completion / seconds |
-| --- | --- | --- |
-| `policy-insufficient-evidence` | complete / 10.16 | complete / 19.14 |
-| `audit-partial-cache` | complete / 10.77 | complete / 12.32 |
-| `recording-brief-occlusion` | partial / 13.41 | complete / 15.91 |
+| Scenario                       | Without skill: completion / seconds | With skill: completion / seconds |
+| ------------------------------ | ----------------------------------- | -------------------------------- |
+| `policy-insufficient-evidence` | complete / 10.16                    | complete / 19.14                 |
+| `audit-partial-cache`          | complete / 10.77                    | complete / 12.32                 |
+| `recording-brief-occlusion`    | partial / 13.41                     | complete / 15.91                 |
 
 All six completed processes returned the expected workflow name, and transcript
 review agreed with their routing. The reviewer recorded zero unsupported
@@ -37,7 +37,7 @@ adjudication covers the six valid responses only.
 - Runner: `codex-cli 0.169.0`, fresh ephemeral sessions, a separate working
   directory per trial, 45-second timeout per process.
 - Flags: `exec --ignore-user-config --ignore-rules --ephemeral --sandbox read-only
-  --skip-git-repo-check --json --output-schema ... --output-last-message ... -`.
+--skip-git-repo-check --json --output-schema ... --output-last-message ... -`.
 - Model and reasoning settings: runner defaults, unpinned and not identified in
   emitted events. Global skill/instruction isolation was not independently
   verified. Treat the comparison as confounded.
