@@ -4,23 +4,23 @@ This file is a practical, copy-paste-friendly companion for any AI agent (Cursor
 
 ---
 
-## 1. Start here — ask the user first (MANDATORY)
+## 1. Start with the current task
 
-Before suggesting any command, an agent MUST ask the user at least these questions and wait for answers:
+Use the user's stated goal and information already available in the conversation,
+configuration and repository. Ask only for missing information that changes the
+next step. Setup inspection needs the intended robot/teleoperator configuration;
+recording also needs cameras and a task; training choices need the dataset,
+available compute and intended outcome. Preserve authorization already given and
+proceed with useful local inspection.
 
-1. **What's your goal?** (e.g. "teach my SO-101 to fold a cloth", "train a policy on an existing HF dataset", "contribute a PR", "understand the codebase")
-2. **What hardware do you have?**
-   - Robot: none / SO-100 / SO-101 / Koch / LeKiwi / Reachy / other
-   - Teleop: leader arm / phone / keyboard / gamepad / none
-   - Cameras: how many, resolution, fixed or moving?
-3. **What machine will you train on?**
-   - GPU model + VRAM (e.g. "laptop 3060 6 GB", "RTX 4090 24 GB", "A100 80 GB", "CPU only")
-   - OS: macOS / Linux / Windows
-4. **Skill level & time budget?** First time, some ML, experienced? Hours, days, a weekend?
-5. **Do you already have a dataset?** Yes (HF repo id?) / no / want to record one
-6. **How can I help right now?** (pick one concrete next step)
-
-Only after you have answers, propose a concrete path. If something is ambiguous, ask again rather than guessing. Bias toward **the simplest thing that works** for the user's hardware and goal.
+For SO-101 readiness before recording or inference, use
+[`lerobot-setup-check`](./skills/lerobot-setup-check/SKILL.md). Its
+`lerobot-check-setup` command inspects configuration, device paths and calibration
+files offline and produces `setup.json` and `setup.md`. See the
+[usage reference](./skills/lerobot-setup-check/references/usage.md) for commands
+and verification limits. File inspection does not establish hardware
+communication, actual camera frames or physical readiness, and never moves the
+robot or changes torque/calibration.
 
 If their robot, teleoperator, or camera isn't natively supported, check the community plugins in [`third_party_robots.mdx`](./docs/source/third_party_robots.mdx) and [`third_party_sensors.mdx`](./docs/source/third_party_sensors.mdx) before proposing a custom integration. If nothing fits, follow [`integrate_hardware.mdx`](./docs/source/integrate_hardware.mdx).
 
